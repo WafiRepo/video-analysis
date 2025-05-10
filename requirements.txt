@@ -1,0 +1,12 @@
+streamlit
+opencv-python-headless
+numpy
+pandas
+plotly
+Pillow
+mediapipe
+tensorflow
+imageio
+streamlit-webrtc
+matplotlib
+uuid
