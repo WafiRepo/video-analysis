@@ -10,3 +10,7 @@ imageio
 streamlit-webrtc
 matplotlib
 uuid
+httpx
+python-dotenv
+fastapi
+uvicorn

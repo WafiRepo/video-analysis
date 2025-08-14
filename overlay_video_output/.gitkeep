@@ -1,0 +1,2 @@
+# This file ensures the overlay_video_output directory is tracked by git
+# Video overlay files will be saved here by the FastAPI application
