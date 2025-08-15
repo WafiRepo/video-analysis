@@ -258,28 +258,88 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
                            file_name="video_metrics.csv",
                            mime="text/csv")
     
-    # If recording is enabled, write the processed video to file for download
+    # If recording is enabled, return the recorded frames as bytes (no file writing)
     if record_video and recorded_frames:
-        video_filename = "recorded_pose_video.mp4"
-        imageio.mimwrite(video_filename, recorded_frames, fps=30, codec='libx264')
-        with open(video_filename, "rb") as vid_file:
-            rec_video_bytes = vid_file.read()
-        if ui_mode:
-            st.download_button(label="Download Recorded Video", 
-                               data=rec_video_bytes, 
-                               file_name=video_filename, 
-                               mime="video/mp4")
+        # Convert frames to video bytes without saving to disk - Windows safe approach
+        try:
+            # Try using BytesIO first (memory-based, no file system)
+            video_buffer = BytesIO()
+            # Ensure frames are in correct format for imageio
+            processed_frames = []
+            for frame in recorded_frames:
+                if frame is not None and frame.size > 0:
+                    # Convert BGR to RGB if needed
+                    if len(frame.shape) == 3 and frame.shape[2] == 3:
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        processed_frames.append(frame_rgb)
+                    else:
+                        processed_frames.append(frame)
+            
+            if processed_frames:
+                imageio.mimwrite(video_buffer, processed_frames, fps=30, format='mp4', codec='libx264')
+                video_buffer.seek(0)
+                rec_video_bytes = video_buffer.getvalue()
+                print(f"✅ Video created in memory: {len(rec_video_bytes)} bytes")
+            else:
+                print("⚠️ No valid frames to process")
+                rec_video_bytes = None
+                
+        except Exception as e:
+            print(f"Warning: Memory-based video creation failed: {e}")
+            # Fallback to temporary file with better error handling
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=True, mode='wb') as temp_file:
+                    # Use processed frames for temp file too
+                    if processed_frames:
+                        imageio.mimwrite(temp_file.name, processed_frames, fps=30, format='mp4', codec='libx264')
+                        temp_file.seek(0)
+                        rec_video_bytes = temp_file.read()
+                        print(f"✅ Video created via temp file: {len(rec_video_bytes)} bytes")
+                    else:
+                        rec_video_bytes = None
+            except Exception as e2:
+                print(f"Error: Temporary file creation failed: {e2}")
+                rec_video_bytes = None
     
-    # If skeleton extraction is enabled, write the skeleton video to file for download
-    if ui_mode and extract_skeleton and skeleton_frames:
-        skeleton_filename = "extracted_skeleton_video.mp4"
-        imageio.mimwrite(skeleton_filename, skeleton_frames, fps=30, codec='libx264')
-        with open(skeleton_filename, "rb") as vid_file:
-            skel_video_bytes = vid_file.read()
-        st.download_button(label="Download Skeleton Video", 
-                           data=skel_video_bytes, 
-                           file_name=skeleton_filename, 
-                           mime="video/mp4")
+    # If skeleton extraction is enabled, return skeleton video as bytes (no file writing)
+    if extract_skeleton and skeleton_frames:
+        # Convert frames to video bytes without saving to disk - Windows safe approach
+        try:
+            # Try using BytesIO first (memory-based, no file system)
+            skeleton_buffer = BytesIO()
+            # Process skeleton frames
+            processed_skeleton_frames = []
+            for frame in skeleton_frames:
+                if frame is not None and frame.size > 0:
+                    if len(frame.shape) == 3 and frame.shape[2] == 3:
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        processed_skeleton_frames.append(frame_rgb)
+                    else:
+                        processed_skeleton_frames.append(frame)
+            
+            if processed_skeleton_frames:
+                imageio.mimwrite(skeleton_buffer, processed_skeleton_frames, fps=30, format='mp4', codec='libx264')
+                skeleton_buffer.seek(0)
+                skel_video_bytes = skeleton_buffer.getvalue()
+                print(f"✅ Skeleton video created in memory: {len(skel_video_bytes)} bytes")
+            else:
+                skel_video_bytes = None
+                
+        except Exception as e:
+            print(f"Warning: Memory-based skeleton creation failed: {e}")
+            # Fallback to temporary file with better error handling
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=True, mode='wb') as temp_file:
+                    if processed_skeleton_frames:
+                        imageio.mimwrite(temp_file.name, processed_skeleton_frames, fps=30, format='mp4', codec='libx264')
+                        temp_file.seek(0)
+                        skel_video_bytes = temp_file.read()
+                        print(f"✅ Skeleton video created via temp file: {len(skel_video_bytes)} bytes")
+                    else:
+                        skel_video_bytes = None
+            except Exception as e2:
+                print(f"Error: Temporary skeleton file creation failed: {e2}")
+                skel_video_bytes = None
     
     metrics_final = (last_valid_metrics if compute_builtin_metrics else {}) or {}
     # Sisipkan hasil tambahan

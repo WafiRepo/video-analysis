@@ -32,7 +32,7 @@ inject_css()
 
 # RAG Chatbot Functions
 async def get_rag_chatbot_analysis(prompt: str) -> dict:
-    """Get analysis from RAG chatbot."""
+    """Get analysis from RAG chatbot with fallback."""
     
     payload = {
         "query": prompt,
@@ -40,20 +40,24 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
     }
     
     try:
-        # Timeout ditingkatkan untuk tugas LLM yang mungkin berjalan lama
+        st.info(f"🤖 Calling RAG chatbot...")
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(RAG_ENDPOINT, json=payload)
             response.raise_for_status()
             
             data = response.json()
             content = data.get("response", "")
+            
+            # Check if content is empty or too short
+            if not content or len(content.strip()) < 10:
+                st.warning("⚠️ RAG response too short, using fallback analysis")
+                return get_fallback_analysis(prompt)
 
             diagnosis = ""
             recommendations = []
             
             if "Diagnosis:" in content:
                 parts = content.split("Diagnosis:", 1)
-                # Periksa apakah Recommendations: ada di bagian kedua
                 if len(parts) > 1 and "Recommendations:" in parts[1]:
                     diag_part, rec_part = parts[1].split("Recommendations:", 1)
                     diagnosis = diag_part.strip()
@@ -61,7 +65,12 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
                 elif len(parts) > 1:
                     diagnosis = parts[1].strip()
             elif content:
-                diagnosis = content  # Fallback jika tidak ada format spesifik
+                diagnosis = content
+                
+            # Validate response quality
+            if len(diagnosis) < 20:
+                st.warning("⚠️ Diagnosis too short, using fallback analysis")
+                return get_fallback_analysis(prompt)
                 
             return {
                 "diagnosis_summary": diagnosis,
@@ -69,75 +78,90 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
             }
 
     except httpx.RequestError as e:
-        error_message = f"Gagal menghubungi chatbot di {RAG_ENDPOINT}. Pastikan endpoint berjalan dan dapat diakses. Detail: {e}"
-        return {"diagnosis_summary": error_message, "exercise_recommendation": []}
+        st.error(f"❌ RAG request failed: {e}")
+        return get_fallback_analysis(prompt)
     except Exception as e:
-        return {"diagnosis_summary": f"Terjadi kesalahan tak terduga: {e}", "exercise_recommendation": []}
+        st.error(f"❌ RAG unexpected error: {e}")
+        return get_fallback_analysis(prompt)
+
+def get_fallback_analysis(prompt: str) -> dict:
+    """Fallback analysis when RAG fails."""
+    
+    st.info("🔄 Using fallback analysis...")
+    
+    # Simple rule-based analysis based on prompt content
+    if "knee" in prompt.lower() and "valgus" in prompt.lower():
+        diagnosis = "Knee valgus detected. This indicates inward knee collapse during squat which can lead to knee pain and instability."
+        recommendations = [
+            "Strengthen hip abductors with side-lying leg raises",
+            "Practice wall squats with resistance band above knees",
+            "Focus on pushing knees outward during squat movement"
+        ]
+    elif "ankle" in prompt.lower() and "dorsi" in prompt.lower():
+        diagnosis = "Limited ankle dorsiflexion detected. This restricts squat depth and can cause compensation patterns."
+        recommendations = [
+            "Perform ankle mobility exercises daily",
+            "Use heel lifts during squats initially",
+            "Practice deep squat holds with support"
+        ]
+    elif "trunk" in prompt.lower() and "lean" in prompt.lower():
+        diagnosis = "Excessive trunk lean detected. This may indicate weak core or hip mobility issues."
+        recommendations = [
+            "Strengthen core with planks and dead bugs",
+            "Improve hip mobility with hip flexor stretches",
+            "Practice wall squats to maintain upright posture"
+        ]
+    else:
+        diagnosis = "General squat form analysis completed. Focus on maintaining proper alignment and controlled movement."
+        recommendations = [
+            "Practice bodyweight squats with proper form",
+            "Gradually increase depth as mobility improves",
+            "Consider professional assessment for personalized guidance"
+        ]
+    
+    return {
+        "diagnosis_summary": diagnosis,
+        "exercise_recommendation": recommendations
+    }
 
 def build_squat_analysis_prompt(squat_metrics, squat_flags, front_video_path="", side_video_path="", back_video_path="") -> str:
-    """Build prompt for RAG chatbot analysis of squat performance."""
+    """Build simplified prompt for RAG chatbot analysis."""
     
-    prompt = f"""
-You are a biomechanics and physical therapy expert specializing in squat analysis. Based on the following squat metrics and flags, provide a comprehensive analysis and recommendations.
-
-SQUAT ANALYSIS DATA:
-
-Front View Metrics:
-- Thorax side bend max: {getattr(squat_metrics, 'thorax_side_bend_max_deg', 'N/A')}°
-- Pelvis drop at depth: {getattr(squat_metrics, 'pelvis_drop_deg_at_depth', 'N/A')}°
-- Left foot external rotation: {getattr(squat_metrics, 'foot_ER_deg_L_at_depth', 'N/A')}°
-- Right foot external rotation: {getattr(squat_metrics, 'foot_ER_deg_R_at_depth', 'N/A')}°
-- Left knee valgus: {getattr(squat_metrics, 'knee_valgus_deg_L_at_depth', 'N/A')}°
-- Right knee valgus: {getattr(squat_metrics, 'knee_valgus_deg_R_at_depth', 'N/A')}°
-- Weight bearing ratio (right): {getattr(squat_metrics, 'com_shift_ratio_right', 'N/A')}
-
-Side View Metrics:
-- Trunk lean max: {getattr(squat_metrics, 'trunk_lean_max_deg', 'N/A')}°
-- Left knee flexion max: {getattr(squat_metrics, 'knee_flex_max_deg_L', 'N/A')}°
-- Right knee flexion max: {getattr(squat_metrics, 'knee_flex_max_deg_R', 'N/A')}°
-- Left hip flexion max: {getattr(squat_metrics, 'hip_flex_max_deg_L', 'N/A')}°
-- Right hip flexion max: {getattr(squat_metrics, 'hip_flex_max_deg_R', 'N/A')}°
-- Left ankle dorsiflexion at depth: {getattr(squat_metrics, 'ankle_dorsi_deg_L_at_depth', 'N/A')}°
-- Right ankle dorsiflexion at depth: {getattr(squat_metrics, 'ankle_dorsi_deg_R_at_depth', 'N/A')}°
-- Squat depth (thigh angle): {getattr(squat_metrics, 'squat_depth_thigh_deg', 'N/A')}°
-
-Back View Metrics:
-- Thorax side bend max: {getattr(squat_metrics, 'thorax_side_bend_max_deg', 'N/A')}°
-- Pelvis drop at depth: {getattr(squat_metrics, 'pelvis_drop_deg_at_depth', 'N/A')}°
-- Left knee valgus: {getattr(squat_metrics, 'knee_valgus_deg_L_at_depth', 'N/A')}°
-- Right knee valgus: {getattr(squat_metrics, 'knee_valgus_deg_R_at_depth', 'N/A')}°
-
-FLAGS (Rule-based Findings):
-"""
+    # Extract key metrics for analysis (only non-zero values)
+    key_metrics = []
+    for attr_name in dir(squat_metrics):
+        if not attr_name.startswith('_'):
+            value = getattr(squat_metrics, attr_name, None)
+            if value is not None and value != 0.0 and value != 'N/A':
+                if isinstance(value, float):
+                    key_metrics.append(f"{attr_name}: {value:.1f}°")
+                else:
+                    key_metrics.append(f"{attr_name}: {value}")
     
-    # Add flags to prompt
+    # Extract key flags (only True values)
+    key_flags = []
     for flag_name in dir(squat_flags):
         if not flag_name.startswith('_'):
             flag_value = getattr(squat_flags, flag_name, False)
-            prompt += f"- {flag_name}: {flag_value}\n"
+            if flag_value is True:
+                key_flags.append(flag_name.replace('_', ' ').title())
     
-    prompt += f"""
-VIDEO FILES:
-- Front view: {front_video_path}
-- Side view: {side_video_path}
-- Back view: {back_video_path}
+    # Build simplified prompt
+    prompt = f"""
+Analyze this squat performance data and provide recommendations:
 
-Please provide a comprehensive analysis in the following format:
+Key Metrics: {', '.join(key_metrics[:8]) if key_metrics else 'No significant metrics detected'}
+Issues Found: {', '.join(key_flags) if key_flags else 'No major issues detected'}
 
-Diagnosis: [Detailed analysis of the person's squat form, highlighting key findings, imbalances, and potential issues based on the metrics and flags.]
+Provide analysis in this format:
+Diagnosis: [Brief analysis of squat form in 2-3 sentences]
 
 Recommendations:
-- [First specific exercise or corrective recommendation with reasoning]
-- [Second recommendation with reasoning]
-- [Third recommendation with reasoning]
-- [Continue as needed...]
+- [First exercise recommendation]
+- [Second exercise recommendation] 
+- [Third exercise recommendation]
 
-Focus on:
-1. Movement quality and form issues
-2. Muscle imbalances and compensations
-3. Specific exercises to address identified problems
-4. Progression recommendations
-5. Safety considerations
+Keep total response under 150 words. Focus on practical exercises and safety.
 """
     
     return prompt

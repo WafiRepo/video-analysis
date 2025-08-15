@@ -1,23 +1,28 @@
 # Cleanup Summary - FastAPI & Streamlit Project
 
 ## Files Removed (First Cleanup):
-- `recorded_pose_video.mp4` (3.8MB) - Recording result video
-- `extracted_skeleton_video.mp4` (1.5MB) - Extracted skeleton video
-- `video_estimation.log` (799KB) - Log file
-- `packages.txt` - Unnecessary package file
-- `src/fastapi_app.py` - Duplicate file (already exists in root)
-- `src/video_estimation.log` (309KB) - Log file in src
-- `src/extracted_skeleton_video.mp4` (306KB) - Skeleton video in src
-- `src/recorded_pose_video.mp4` (349KB) - Recording video in src
-- `src/Coklat Tua & Biru Tua  - Logo 2 Fix.png` (264KB) - Unnecessary logo
-- `__pycache__/` - Python cache (root and src)
-- `src/__pycache__/` - Python cache in src
+- `recorded_pose_video.mp4` (3.8MB) - Recording result video ✅ **REMOVED**
+- `extracted_skeleton_video.mp4` (1.5MB) - Extracted skeleton video ✅ **REMOVED**
+- `video_estimation.log` (799KB) - Log file ✅ **REMOVED**
+- `packages.txt` - Unnecessary package file ✅ **REMOVED**
+- `src/fastapi_app.py` - Duplicate file (already exists in root) ✅ **REMOVED**
+- `src/video_estimation.log` (309KB) - Log file in src ✅ **REMOVED**
+- `src/extracted_skeleton_video.mp4` (306KB) - Skeleton video in src ✅ **REMOVED**
+- `src/recorded_pose_video.mp4` (349KB) - Recording video in src ✅ **REMOVED**
+- `src/Coklat Tua & Biru Tua  - Logo 2 Fix.png` (264KB) - Unnecessary logo ✅ **REMOVED**
+- `__pycache__/` - Python cache (root and src) ✅ **REMOVED**
+- `src/__pycache__/` - Python cache in src ✅ **REMOVED**
 
 ## Files Removed (Second Cleanup - Modules):
-- `src/modules/webcam_transformers.py` (12KB) - Not used in main application
-- `src/modules/session_history.py` (811B) - Only used for session history (not critical)
-- `src/modules/comparison_mode.py` (3.1KB) - Not used in main application
-- `src/modules/image_analysis.py` (10KB) - Not used in main application
+- `src/modules/webcam_transformers.py` (12KB) - Not used in main application ✅ **REMOVED**
+- `src/modules/session_history.py` (811B) - Only used for session history (not critical) ✅ **REMOVED**
+- `src/modules/comparison_mode.py` (3.1KB) - Not used in main application ✅ **REMOVED**
+- `src/modules/image_analysis.py` (10KB) - Not used in main application ✅ **REMOVED**
+
+## Files Removed (Third Cleanup - Video Output):
+- `recorded_pose_video.mp4` (2.7MB) - Root directory video output ✅ **REMOVED**
+- Modified `video_estimation.py` to prevent unwanted video file creation
+- Updated `.gitignore` to exclude unwanted video files
 
 ## Remaining Files (Only Essential Ones):
 
