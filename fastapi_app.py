@@ -10,6 +10,10 @@ import cv2
 import numpy as np
 import time
 import uuid
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+import io
+from dotenv import load_dotenv
 
 # Add src to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -29,14 +33,28 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
+# RAG Chatbot Configuration
+load_dotenv()
+RAG_ENDPOINT = os.getenv("RAG_ENDPOINT", "http://15.152.36.109/api/chat")
+USER_ID = os.getenv("USER_ID", "60d5ec49e472e3a8e4e1d3b4")
+# AWS S3 Configuration
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION")
+AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME")
+
+s3_client = boto3.client(
+    "s3",
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION
+)
+BUCKET_NAME = AWS_BUCKET_NAME
+
 # Health check endpoint
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "Squat Analysis API is running"}
-
-# RAG Chatbot Configuration
-RAG_ENDPOINT = os.getenv("RAG_ENDPOINT", "http://15.152.36.109/api/chat")
-USER_ID = os.getenv("USER_ID", "60d5ec49e472e3a8e4e1d3b4")
 
 async def get_rag_chatbot_analysis(prompt: str) -> dict:
     """Get analysis from RAG chatbot with fallback."""
@@ -324,6 +342,7 @@ def _process_angle(
     metrics, flags = analyze_squat_from_sequence(pose_frames, score_thr=0.45)
     return metrics.__dict__, flags.__dict__, reps, video_path
 
+
 @app.post("/squat-analysis")
 async def squat_analysis_api(
     front: UploadFile = File(...),
@@ -356,6 +375,283 @@ async def squat_analysis_api(
         
         print("🔄 Processing Back view...")
         back_metrics_all, back_flags_all, reps_back, back_video = _process_angle(analyzer, back, "Back")
+        print(f"✅ Back processed: {reps_back} reps, video: {back_video}")
+        
+        # Validate that we have at least some data
+        if not side_metrics_all and not front_metrics_all and not back_metrics_all:
+            return JSONResponse(
+                status_code=400, 
+                content={"error": "No valid pose data detected in any video. Please check video quality and ensure person is visible."}
+            )
+        
+        # Get RAG analysis for comprehensive diagnosis
+        try:
+            rag_prompt = build_squat_analysis_prompt(
+                side_metrics_all or front_metrics_all or back_metrics_all,  # Use any available metrics
+                side_flags_all or front_flags_all or back_flags_all,       # Use any available flags
+                front_video, side_video, back_video
+            )
+            
+            print(f"🤖 Calling RAG with prompt length: {len(rag_prompt)}")
+            rag_result = await get_rag_chatbot_analysis(rag_prompt)
+            print(f"✅ RAG analysis completed")
+            
+            # Validate RAG result
+            if not rag_result or not rag_result.get("diagnosis_summary"):
+                print("⚠️ RAG result invalid, using fallback")
+                rag_result = await get_fallback_analysis(rag_prompt)
+            
+        except Exception as e:
+            print(f"⚠️ RAG analysis failed: {e}")
+            # Use fallback analysis
+            rag_result = await get_fallback_analysis("squat analysis")
+
+        # Filter relevant metrics per angle
+        front_metrics = {}
+        if front_metrics_all:
+            front_metrics = {
+                "thorax_side_bend_max_deg": float(front_metrics_all.get("thorax_side_bend_max_deg", 0.0)),
+                "pelvis_drop_deg_at_depth": float(front_metrics_all.get("pelvis_drop_deg_at_depth", 0.0)),
+                "foot_ER_deg_L_at_depth": float(front_metrics_all.get("foot_ER_deg_L_at_depth", 0.0)),
+                "foot_ER_deg_R_at_depth": float(front_metrics_all.get("foot_ER_deg_R_at_depth", 0.0)),
+                "knee_valgus_deg_L_at_depth": float(front_metrics_all.get("knee_valgus_deg_L_at_depth", 0.0)),
+                "knee_valgus_deg_R_at_depth": float(front_metrics_all.get("knee_valgus_deg_R_at_depth", 0.0)),
+                "com_shift_ratio_right": float(front_metrics_all.get("com_shift_ratio_right", 0.5)),
+            }
+
+        side_metrics = {}
+        if side_metrics_all:
+            side_metrics = {
+                "trunk_lean_max_deg": float(side_metrics_all.get("trunk_lean_max_deg", 0.0)),
+                "knee_flex_max_deg_L": float(side_metrics_all.get("knee_flex_max_deg_L", 0.0)),
+                "knee_flex_max_deg_R": float(side_metrics_all.get("knee_flex_max_deg_R", 0.0)),
+                "hip_flex_max_deg_L": float(side_metrics_all.get("hip_flex_max_deg_L", 0.0)),
+                "hip_flex_max_deg_R": float(side_metrics_all.get("hip_flex_max_deg_R", 0.0)),
+                "ankle_dorsi_deg_L_at_depth": float(side_metrics_all.get("ankle_dorsi_deg_L_at_depth", 0.0)),
+                "ankle_dorsi_deg_R_at_depth": float(side_metrics_all.get("ankle_dorsi_deg_R_at_depth", 0.0)),
+                "squat_depth_thigh_deg": float(side_metrics_all.get("squat_depth_thigh_deg", 0.0)),
+            }
+
+        back_metrics = {}
+        if back_metrics_all:
+            back_metrics = {
+                "thorax_side_bend_max_deg": float(back_metrics_all.get("thorax_side_bend_max_deg", 0.0)),
+                "pelvis_drop_deg_at_depth": float(back_metrics_all.get("pelvis_drop_deg_at_depth", 0.0)),
+                "knee_valgus_deg_L_at_depth": float(back_metrics_all.get("knee_valgus_deg_L_at_depth", 0.0)),
+                "knee_valgus_deg_R_at_depth": float(back_metrics_all.get("knee_valgus_deg_R_at_depth", 0.0)),
+            }
+
+        # Calculate processing time
+        processing_time = time.time() - start_time
+        
+        # Build response
+        try:
+            # Ensure all data is JSON serializable
+            def clean_for_json(obj):
+                if isinstance(obj, dict):
+                    return {k: clean_for_json(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [clean_for_json(item) for item in obj]
+                elif isinstance(obj, (int, float, str, bool)) or obj is None:
+                    return obj
+                else:
+                    return str(obj)
+            
+            response_data = {
+                "front": {
+                    "metrics": clean_for_json(front_metrics), 
+                    "flags": clean_for_json(front_flags_all), 
+                    "squat_reps": int(reps_front),
+                    "video_overlay_path": str(front_video)
+                },
+                "side": {
+                    "metrics": clean_for_json(side_metrics), 
+                    "flags": clean_for_json(side_flags_all), 
+                    "squat_reps": int(reps_side),
+                    "video_overlay_path": str(side_video)
+                },
+                "back": {
+                    "metrics": clean_for_json(back_metrics), 
+                    "flags": clean_for_json(back_flags_all), 
+                    "squat_reps": int(reps_back),
+                    "video_overlay_path": str(back_video)
+                },
+                "ai_analysis": {
+                    "diagnosis_summary": str(rag_result.get("diagnosis_summary", "Analysis completed")),
+                    "exercise_recommendations": clean_for_json(rag_result.get("exercise_recommendation", ["Focus on proper squat form"]))
+                },
+                "processing_info": {
+                    "processing_time_seconds": round(processing_time, 2),
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "status": "completed"
+                }
+            }
+            
+            # Validate response data before returning
+            if not isinstance(response_data, dict):
+                raise ValueError("Response data is not a dictionary")
+            
+            # Check if all required fields exist
+            required_fields = ["front", "side", "back", "ai_analysis"]
+            for field in required_fields:
+                if field not in response_data:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            # Test JSON serialization
+            import json
+            try:
+                json.dumps(response_data)
+                print(f"✅ Response JSON serialization test passed")
+            except Exception as json_error:
+                print(f"❌ JSON serialization failed: {json_error}")
+                raise ValueError(f"Response data not JSON serializable: {json_error}")
+            
+            print(f"✅ Response data validated successfully")
+            print(f"✅ Squat analysis completed successfully")
+            print(f"📊 Response summary:")
+            print(f"   - Front metrics: {len(response_data['front']['metrics'])} items")
+            print(f"   - Side metrics: {len(response_data['side']['metrics'])} items")
+            print(f"   - Back metrics: {len(response_data['back']['metrics'])} items")
+            print(f"   - AI analysis: {len(response_data['ai_analysis']['diagnosis_summary'])} chars")
+            
+            # Return with proper headers
+            from fastapi.responses import Response
+            return Response(
+                content=json.dumps(response_data, ensure_ascii=False),
+                media_type="application/json",
+                headers={
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+            
+        except Exception as response_error:
+            print(f"❌ Error building response: {response_error}")
+            # Return a minimal valid response
+            minimal_response = {
+                "front": {"metrics": {}, "flags": {}, "squat_reps": 0, "video_overlay_path": ""},
+                "side": {"metrics": {}, "flags": {}, "squat_reps": 0, "video_overlay_path": ""},
+                "back": {"metrics": {}, "flags": {}, "squat_reps": 0, "video_overlay_path": ""},
+                "ai_analysis": {
+                    "diagnosis_summary": "Analysis completed with basic metrics",
+                    "exercise_recommendations": ["Focus on proper squat form", "Practice regularly", "Consider professional guidance"]
+                },
+                "processing_info": {
+                    "processing_time_seconds": round(time.time() - start_time, 2),
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "status": "completed_with_fallback"
+                }
+            }
+            
+            # Return minimal response with proper headers
+            from fastapi.responses import Response
+            import json
+            return Response(
+                content=json.dumps(minimal_response, ensure_ascii=False),
+                media_type="application/json",
+                headers={
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+        
+    except Exception as e:
+        print(f"❌ Error in squat analysis: {str(e)}")
+        print(f"❌ Error type: {type(e).__name__}")
+        print(f"❌ Error details: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        # Return a more informative error response
+        error_response = {
+            "error": f"Internal server error: {str(e)}",
+            "error_type": type(e).__name__,
+            "timestamp": time.time(),
+            "status": "failed"
+        }
+        
+        return JSONResponse(
+            status_code=500, 
+            content=error_response
+        )
+
+def _process_angle_s3(
+    analyzer,
+    upload: UploadFile,
+    angle_name: str,
+    customer_id: str,
+) -> Tuple[Dict[str, Any], Dict[str, Any], int, str]:
+    """Proses satu angle, kembalikan (metrics, flags, reps, s3_url)."""
+    upload.file.seek(0)
+    rvid, _, met = run_video_estimation(
+        analyzer,
+        upload.file,
+        0.45,
+        record_video=True,
+        extract_skeleton=False,
+        compute_builtin_metrics=False,
+        ui_mode=False,
+    )
+    pose_frames = met.get("pose_frames", []) if isinstance(met, dict) else []
+    reps = int(met.get("squat_reps", 0)) if isinstance(met, dict) else 0
+
+    if rvid:
+        try:
+            # Ambil ekstensi file asli
+            ext = os.path.splitext(upload.filename)[1]  # misal '.mp4'
+            # Buat nama file sesuai format
+            video_filename = f"dynamic-movement-analysis/{customer_id}/{angle_name.lower()}-{uuid.uuid4()}{ext}"
+
+            # Upload langsung dari memory
+            file_obj = io.BytesIO(rvid)
+            s3_client.upload_fileobj(file_obj, BUCKET_NAME, video_filename)
+            s3_url = f"https://{BUCKET_NAME}.s3.{s3_client.meta.region_name}.amazonaws.com/{video_filename}"
+            print(f"✅ Video overlay uploaded to S3: {s3_url}")
+        except Exception as e:
+            print(f"⚠️ Could not upload video to S3: {e}")
+            s3_url = ""
+    else:
+        print(f"⚠️ No video data available for {angle_name}")
+        s3_url = ""
+
+    if not pose_frames:
+        return {}, {}, reps, s3_url
+
+    metrics, flags = analyze_squat_from_sequence(pose_frames, score_thr=0.45)
+    return metrics.__dict__, flags.__dict__, reps, s3_url
+@app.post("/squat-analysis-s3")
+async def squat_analysis_api(
+    front: UploadFile = File(...),
+    side: UploadFile = File(...),
+    back: UploadFile = File(...),
+    customer_id: str = Form(...)
+):
+    start_time = time.time()
+    try:
+        print(f"Processing squat analysis request...")
+        print(f"Front video: {front.filename}")
+        print(f"Side video: {side.filename}")
+        print(f"Back video: {back.filename}")
+
+        # Inisialisasi analyzer - MediaPipe fixed
+        try:
+            analyzer = get_pose_analyzer("MediaPipe", None)
+            if analyzer is None:
+                return JSONResponse(status_code=500, content={"error": "MediaPipe model failed to load."})
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"Failed to init MediaPipe model: {e}"})
+
+        # Proses tiap angle
+        print("🔄 Processing Front view...")
+        front_metrics_all, front_flags_all, reps_front, front_video = _process_angle_s3(analyzer, front, "Front", customer_id)
+        print(f"✅ Front processed: {reps_front} reps, video: {front_video}")
+        
+        print("🔄 Processing Side view...")
+        side_metrics_all, side_flags_all, reps_side, side_video = _process_angle_s3(analyzer, side, "Side", customer_id)
+        print(f"✅ Side processed: {reps_side} reps, video: {side_video}")
+        
+        print("🔄 Processing Back view...")
+        back_metrics_all, back_flags_all, reps_back, back_video = _process_angle_s3(analyzer, back, "Back", customer_id)
         print(f"✅ Back processed: {reps_back} reps, video: {back_video}")
         
         # Validate that we have at least some data
