@@ -23,6 +23,7 @@ from modules.pose_estimators import get_pose_analyzer
 from modules.video_estimation import run_video_estimation
 from modules.squat_analysis import analyze_squat_from_sequence
 from modules.thresholding import filter_and_score_metrics
+import base64
 
 app = FastAPI(title="Holowellness Squat Analysis API")
 
@@ -82,6 +83,21 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
             print(f"📝 RAG response length: {len(content)}")
             print(f"📝 RAG response preview: {content[:200]}...")
             
+            # Try to parse JSON payload (explanation/recommendations) if present
+            try:
+                import json as _json
+                if isinstance(content, str) and content.strip().startswith("{"):
+                    parsed = _json.loads(content)
+                    if isinstance(parsed, dict):
+                        expl = parsed.get("explanation", "")
+                        recs = parsed.get("recommendations", []) or parsed.get("exercise_recommendation", [])
+                        if isinstance(recs, str):
+                            recs = [recs]
+                        if isinstance(recs, list):
+                            return {"diagnosis_summary": expl or "", "exercise_recommendation": recs}
+            except Exception:
+                pass
+
             # Check if content is empty or too short
             if not content or len(content.strip()) < 10:
                 print("⚠️ RAG response too short")
@@ -127,20 +143,28 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
                 elif len(parts) > 1:
                     diagnosis = parts[1].strip()
             elif content:
-                # Fallback: try to extract meaningful content
+                # Fallback: try to extract meaningful content (also supports JSON-like keys)
                 lines = content.strip().split('\n')
                 diagnosis_lines = []
                 rec_lines = []
                 
                 for line in lines:
                     line = line.strip()
+                    if line.lower().startswith('"explanation"') or line.lower().startswith('explanation'):
+                        # crude JSON-like extraction
+                        val = line.split(':', 1)[-1].strip().strip('", ')
+                        if val:
+                            diagnosis_lines.append(val)
+                        continue
+                    if line.lower().startswith('"recommendations"') or line.lower().startswith('recommendations'):
+                        continue
                     if line and not line.startswith('-') and len(line) > 20:
                         diagnosis_lines.append(line)
                     elif line.startswith('-') or line.startswith('•') or line.startswith('*'):
                         rec_lines.append(line.strip('-•* '))
                 
-                diagnosis = ' '.join(diagnosis_lines[:3])  # Take first 3 meaningful lines
-                recommendations = rec_lines[:3]  # Take first 3 recommendations
+                diagnosis = ' '.join(diagnosis_lines[:3])
+                recommendations = rec_lines[:3]
                 
             # Validate response quality
             if len(diagnosis) < 20:
@@ -165,6 +189,24 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
     except Exception as e:
         print(f"❌ RAG unexpected error: {e}")
         return {"diagnosis_summary": "", "exercise_recommendation": []}
+
+async def get_rag_side_analysis(side_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Call RAG with a compact, per-side payload and return explanation/recommendations only."""
+    try:
+        import json as _json
+        prompt = (
+            "Provide a brief explanation (2-3 sentences) and 3 actionable recommendations for this view.\n" +
+            f"DATA:\n{_json.dumps(side_payload, ensure_ascii=False)}\n" +
+            "Respond in JSON with keys: explanation (string), recommendations (array of 3 strings)."
+        )
+        res = await get_rag_chatbot_analysis(prompt)
+        # map to expected keys
+        return {
+            "explanation": res.get("diagnosis_summary", ""),
+            "recommendations": res.get("exercise_recommendation", [])
+        }
+    except Exception:
+        return {"explanation": "", "recommendations": []}
 
 # Removed fallback analysis per requirement; RAG-only mode
 
@@ -247,7 +289,7 @@ def _process_angle(
     analyzer,
     upload: UploadFile,
     angle_name: str,
-) -> Tuple[Dict[str, Any], Dict[str, Any], int, str]:
+) -> Tuple[Dict[str, Any], Dict[str, Any], int, str, List[Dict[str, Any]], float, List[Dict[str, Any]]]:
     """Proses satu angle, kembalikan (metrics, flags, reps, video_path)."""
     upload.file.seek(0)
     rvid, _, met = run_video_estimation(
@@ -283,14 +325,15 @@ def _process_angle(
         print(f"⚠️ No video data available for {angle_name}")
     
     if not pose_frames:
-        return {}, {}, reps, video_path
+        return {}, {}, reps, video_path, [], None, []
     
     # Ambil fps & rep_events dari hasil video estimation
     fps = met.get("fps") if isinstance(met, dict) else None
     rep_events = met.get("rep_events") if isinstance(met, dict) else None
 
     metrics, flags = analyze_squat_from_sequence(pose_frames, score_thr=0.45, rep_events=rep_events, fps=fps)
-    return metrics.__dict__, flags.__dict__, reps, video_path
+    bottom_snaps = met.get("bottom_snapshots") if isinstance(met, dict) else []
+    return metrics.__dict__, flags.__dict__, reps, video_path, rep_events or [], float(fps) if fps else None, bottom_snaps or []
 
 
 @app.post("/squat-analysis")
@@ -318,15 +361,15 @@ async def squat_analysis_api(
 
         # Proses tiap angle
         print("🔄 Processing Front view...")
-        front_metrics_all, front_flags_all, reps_front, front_video = _process_angle(analyzer, front, "Front")
+        front_metrics_all, front_flags_all, reps_front, front_video, front_rep_events, front_fps, _ = _process_angle(analyzer, front, "Front")
         print(f"✅ Front processed: {reps_front} reps, video: {front_video}")
         
         print("🔄 Processing Side view...")
-        side_metrics_all, side_flags_all, reps_side, side_video = _process_angle(analyzer, side, "Side")
+        side_metrics_all, side_flags_all, reps_side, side_video, side_rep_events, side_fps, side_bottom_snaps = _process_angle(analyzer, side, "Side")
         print(f"✅ Side processed: {reps_side} reps, video: {side_video}")
         
         print("🔄 Processing Back view...")
-        back_metrics_all, back_flags_all, reps_back, back_video = _process_angle(analyzer, back, "Back")
+        back_metrics_all, back_flags_all, reps_back, back_video, back_rep_events, back_fps, _ = _process_angle(analyzer, back, "Back")
         print(f"✅ Back processed: {reps_back} reps, video: {back_video}")
         
         # Validate that we have at least some data
@@ -361,21 +404,58 @@ async def squat_analysis_api(
             back_metrics = {k: v for k, v in back_filtered_full.items() if not k.endswith("__status")}
             back_metric_status = {k.replace("__status", ""): v for k, v in back_filtered_full.items() if k.endswith("__status")}
 
-        # Get RAG analysis for comprehensive diagnosis (uses full filtered incl. statuses)
+        # Per-side RAG explanations (front/side/back)
         try:
-            rag_prompt = build_squat_analysis_prompt(
-                front_filtered_full, side_filtered_full, back_filtered_full,
-                front_flags_all, side_flags_all, back_flags_all,
-                sex, age, reps_front, reps_side, reps_back
-            )
-            print(f"🤖 Calling RAG with prompt length: {len(rag_prompt)}")
-            rag_result = await get_rag_chatbot_analysis(rag_prompt)
-            print(f"✅ RAG analysis completed (no fallback mode)")
-            if not rag_result:
-                rag_result = {"diagnosis_summary": "", "exercise_recommendation": []}
+            front_rag = await get_rag_side_analysis({"sex": sex, "age": age, "metrics": front_filtered_full, "reps": reps_front}) if front_filtered_full else {"explanation": "", "recommendations": []}
+            side_rag  = await get_rag_side_analysis({"sex": sex, "age": age, "metrics": side_filtered_full,  "reps": reps_side }) if side_filtered_full  else {"explanation": "", "recommendations": []}
+            back_rag  = await get_rag_side_analysis({"sex": sex, "age": age, "metrics": back_filtered_full,  "reps": reps_back }) if back_filtered_full  else {"explanation": "", "recommendations": []}
         except Exception as e:
-            print(f"⚠️ RAG analysis failed: {e}")
-            rag_result = {"diagnosis_summary": "", "exercise_recommendation": []}
+            print(f"⚠️ RAG per-side failed: {e}")
+            front_rag = side_rag = back_rag = {"explanation": "", "recommendations": []}
+
+        # ── Overall scoring (Raw, Penalties, Final, Grade, Parallel achieved) ──────────
+        def _status_priority(s: str) -> int:
+            if s == "Poor": return 3
+            if s == "Partial": return 2
+            if s == "Good": return 1
+            return 0  # N/A or missing
+
+        def _status_penalty(s: str) -> int:
+            if s == "Poor": return 10
+            if s == "Partial": return 5
+            return 0  # Good/N/A
+
+        # Combine worst status across views for each metric key
+        all_metric_keys = set(list(front_metric_status.keys()) + list(side_metric_status.keys()) + list(back_metric_status.keys()))
+        combined_status: Dict[str, str] = {}
+        total_penalties = 0
+        for key in sorted(all_metric_keys):
+            sts = []
+            if key in front_metric_status: sts.append(front_metric_status[key])
+            if key in side_metric_status: sts.append(side_metric_status[key])
+            if key in back_metric_status: sts.append(back_metric_status[key])
+            if not sts:
+                continue
+            worst = max(sts, key=_status_priority)
+            combined_status[key] = worst
+            total_penalties += _status_penalty(worst)
+
+        raw_score = 100
+        final_score = max(0, raw_score - total_penalties)
+
+        if final_score >= 85:
+            grade = "A"
+        elif final_score >= 70:
+            grade = "B"
+        elif final_score >= 50:
+            grade = "C"
+        else:
+            grade = "D"
+
+        # Parallel achieved from depth status (prefer Side view)
+        depth_status_side = side_metric_status.get("squat_depth_thigh_deg") if side_metric_status else None
+        depth_status_any = depth_status_side or front_metric_status.get("squat_depth_thigh_deg") or back_metric_status.get("squat_depth_thigh_deg")
+        parallel_achieved = bool(depth_status_any == "Good")
 
         # Calculate processing time
         processing_time = time.time() - start_time
@@ -410,36 +490,94 @@ async def squat_analysis_api(
                 # Fallback: stringify
                 return str(obj)
             
+            # Build side snapshots (only for Side view, reps 2..4) and save PNG files
+            side_snapshots = []
+            try:
+                import cv2 as _cv
+                import os as _os
+                import base64 as _b64
+                out_dir = _os.path.join("repetition output")
+                _os.makedirs(out_dir, exist_ok=True)
+                # Prefer in-memory snapshots captured at bottom
+                snaps_map = {s.get("rep"): s.get("frame") for s in side_bottom_snaps if isinstance(s, dict)}
+                needed_reps = [2, 3, 4]
+                present_reps = set()
+                for rep_num in needed_reps:
+                    img = snaps_map.get(rep_num)
+                    if img is None:
+                        continue
+                    ts = int(time.time())
+                    fname = f"side_rep{rep_num}_down_{ts}.png"
+                    fpath = _os.path.join(out_dir, fname)
+                    if _cv.imwrite(fpath, img):
+                        with open(fpath, 'rb') as f:
+                            b64 = _b64.b64encode(f.read()).decode('ascii')
+                        side_snapshots.append({"rep": rep_num, "image_base64": b64, "file_path": fpath})
+                        present_reps.add(rep_num)
+                # Fallback to reading overlay video at bottom_time_sec for missing reps
+                missing = [r for r in needed_reps if r not in present_reps]
+                if missing and side_rep_events and side_fps and side_video and os.path.exists(side_video):
+                    cap = _cv.VideoCapture(side_video)
+                    total = int(cap.get(_cv.CAP_PROP_FRAME_COUNT) or 0)
+                    for rep_num in missing:
+                        idx = rep_num - 1
+                        if 0 <= idx < len(side_rep_events):
+                            bt = side_rep_events[idx].get("bottom_time_sec")
+                            if bt is None:
+                                continue
+                            fi = max(0, min(int(round(bt * side_fps)), total - 1))
+                            cap.set(_cv.CAP_PROP_POS_FRAMES, fi)
+                            ok, frame = cap.read()
+                            if not ok or frame is None:
+                                continue
+                            ts = int(time.time())
+                            fname = f"side_rep{rep_num}_down_{ts}.png"
+                            fpath = _os.path.join(out_dir, fname)
+                            if _cv.imwrite(fpath, frame):
+                                with open(fpath, 'rb') as f:
+                                    b64 = _b64.b64encode(f.read()).decode('ascii')
+                                side_snapshots.append({"rep": rep_num, "image_base64": b64, "file_path": fpath})
+                    cap.release()
+            except Exception as _e:
+                print(f"⚠️ Side snapshots error: {_e}")
+
             response_data = {
                 "front": {
                     "metrics": clean_for_json(front_metrics), 
                     "metric_status": clean_for_json(front_metric_status), 
-                    "flags": clean_for_json(front_flags_all), 
+                    "explanation": str(front_rag.get("explanation", "")),
+                    "recommendations": clean_for_json(front_rag.get("recommendations", [])),
                     "squat_reps": int(reps_front),
                     "video_overlay_path": str(front_video)
                 },
                 "side": {
                     "metrics": clean_for_json(side_metrics), 
                     "metric_status": clean_for_json(side_metric_status), 
-                    "flags": clean_for_json(side_flags_all), 
+                    "snapshots_down": side_snapshots,
+                    "explanation": str(side_rag.get("explanation", "")),
+                    "recommendations": clean_for_json(side_rag.get("recommendations", [])),
                     "squat_reps": int(reps_side),
                     "video_overlay_path": str(side_video)
                 },
                 "back": {
                     "metrics": clean_for_json(back_metrics), 
                     "metric_status": clean_for_json(back_metric_status), 
-                    "flags": clean_for_json(back_flags_all), 
+                    "explanation": str(back_rag.get("explanation", "")),
+                    "recommendations": clean_for_json(back_rag.get("recommendations", [])),
                     "squat_reps": int(reps_back),
                     "video_overlay_path": str(back_video)
-                },
-                "ai_analysis": {
-                    "diagnosis_summary": str(rag_result.get("diagnosis_summary", "Analysis completed")),
-                    "exercise_recommendations": clean_for_json(rag_result.get("exercise_recommendation", ["Focus on proper squat form"]))
                 },
                 "processing_info": {
                     "processing_time_seconds": round(processing_time, 2),
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "status": "completed"
+                },
+                "overall": {
+                    "raw_score": int(raw_score),
+                    "total_penalties": int(total_penalties),
+                    "final_score": int(final_score),
+                    "grade": grade,
+                    "parallel_achieved": parallel_achieved
                 }
             }
             
@@ -448,7 +586,7 @@ async def squat_analysis_api(
                 raise ValueError("Response data is not a dictionary")
             
             # Check if all required fields exist
-            required_fields = ["front", "side", "back", "ai_analysis"]
+            required_fields = ["front", "side", "back", "processing_info", "overall"]
             for field in required_fields:
                 if field not in response_data:
                     raise ValueError(f"Missing required field: {field}")
@@ -468,7 +606,7 @@ async def squat_analysis_api(
             print(f"   - Front metrics: {len(response_data['front']['metrics'])} items")
             print(f"   - Side metrics: {len(response_data['side']['metrics'])} items")
             print(f"   - Back metrics: {len(response_data['back']['metrics'])} items")
-            print(f"   - AI analysis: {len(response_data['ai_analysis']['diagnosis_summary'])} chars")
+            # No AI analysis field in the new response structure
             
             # Return with proper headers
             from fastapi.responses import Response
@@ -483,19 +621,44 @@ async def squat_analysis_api(
             
         except Exception as response_error:
             print(f"❌ Error building response: {response_error}")
-            # Return a minimal valid response
+            # Return a minimal valid response (no flags, no ai_analysis)
             minimal_response = {
-                "front": {"metrics": {}, "flags": {}, "squat_reps": 0, "video_overlay_path": ""},
-                "side": {"metrics": {}, "flags": {}, "squat_reps": 0, "video_overlay_path": ""},
-                "back": {"metrics": {}, "flags": {}, "squat_reps": 0, "video_overlay_path": ""},
-                "ai_analysis": {
-                    "diagnosis_summary": "Analysis completed with basic metrics",
-                    "exercise_recommendations": ["Focus on proper squat form", "Practice regularly", "Consider professional guidance"]
+                "front": {
+                    "metrics": {},
+                    "metric_status": {},
+                    "explanation": "",
+                    "recommendations": [],
+                    "squat_reps": 0,
+                    "video_overlay_path": ""
+                },
+                "side": {
+                    "metrics": {},
+                    "metric_status": {},
+                    "snapshots_down": [],
+                    "explanation": "",
+                    "recommendations": [],
+                    "squat_reps": 0,
+                    "video_overlay_path": ""
+                },
+                "back": {
+                    "metrics": {},
+                    "metric_status": {},
+                    "explanation": "",
+                    "recommendations": [],
+                    "squat_reps": 0,
+                    "video_overlay_path": ""
                 },
                 "processing_info": {
                     "processing_time_seconds": round(time.time() - start_time, 2),
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "status": "completed_with_fallback"
+                },
+                "overall": {
+                    "raw_score": 100,
+                    "total_penalties": 0,
+                    "final_score": 100,
+                    "grade": "A",
+                    "parallel_achieved": False
                 }
             }
             

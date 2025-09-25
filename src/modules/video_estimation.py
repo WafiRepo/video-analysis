@@ -146,6 +146,8 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
     phase = "up"  # up -> turun; down -> naik
     knee_angle_ema = None
     alpha_ema = 0.2
+    # Simpan snapshot frame saat posisi bottom (overlay)
+    bottom_snapshots = []
     # Event repetisi untuk tempo (top/bottom timestamps)
     rep_events = []
     last_top_time = None
@@ -210,6 +212,16 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
                 # Transisi menuju bottom
                 phase = "down"
                 pending_bottom_time = time.time() - start_time
+                # Simpan snapshot bottom untuk rep yang sedang berjalan (rep selanjutnya)
+                try:
+                    current_rep_index = rep_count + 1
+                    if overlay_frame is not None:
+                        bottom_snapshots.append({
+                            "rep": int(current_rep_index),
+                            "frame": overlay_frame.copy()
+                        })
+                except Exception:
+                    pass
             elif phase == "down" and knee_angle_ema > 160.0:
                 # Mencapai top; rep selesai
                 rep_count += 1
@@ -370,6 +382,7 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
     metrics_final["squat_reps"] = rep_count
     metrics_final["fps"] = final_fps
     metrics_final["rep_events"] = rep_events
+    metrics_final["bottom_snapshots"] = bottom_snapshots
     if ui_mode and no_pose_detected:
         logging.warning("Tidak ada pose yang terdeteksi pada seluruh video.")
         st.warning("Tidak ada pose yang terdeteksi pada video. Pastikan video cukup terang dan tubuh terlihat jelas.")

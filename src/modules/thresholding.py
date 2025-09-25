@@ -32,6 +32,12 @@ def _score_direction(value: float, rule: Dict[str, Any]) -> str:
 	"""
 	if value is None:
 		return "N/A"
+	# Treat NaN/Inf as N/A (do not penalize)
+	try:
+		if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+			return "N/A"
+	except Exception:
+		pass
 	try:
 		direction = rule.get("direction")
 		if direction == ">=":
