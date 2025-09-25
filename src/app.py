@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from modules.pose_estimators import get_pose_analyzer
 from modules.video_estimation import run_video_estimation, save_session
 from modules.squat_analysis import analyze_squat_from_sequence
+from modules.thresholding import filter_and_score_metrics
 
 # Load environment variables
 load_dotenv()
@@ -32,7 +33,7 @@ inject_css()
 
 # RAG Chatbot Functions
 async def get_rag_chatbot_analysis(prompt: str) -> dict:
-    """Get analysis from RAG chatbot with fallback."""
+    """Get analysis from RAG chatbot only (no fallback)."""
     
     payload = {
         "query": prompt,
@@ -50,8 +51,8 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
             
             # Check if content is empty or too short
             if not content or len(content.strip()) < 10:
-                st.warning("⚠️ RAG response too short, using fallback analysis")
-                return get_fallback_analysis(prompt)
+                st.warning("⚠️ RAG response too short")
+                return {"diagnosis_summary": "", "exercise_recommendation": []}
 
             diagnosis = ""
             recommendations = []
@@ -69,8 +70,8 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
                 
             # Validate response quality
             if len(diagnosis) < 20:
-                st.warning("⚠️ Diagnosis too short, using fallback analysis")
-                return get_fallback_analysis(prompt)
+                st.warning("⚠️ Diagnosis too short from RAG")
+                return {"diagnosis_summary": "", "exercise_recommendation": []}
                 
             return {
                 "diagnosis_summary": diagnosis,
@@ -79,10 +80,10 @@ async def get_rag_chatbot_analysis(prompt: str) -> dict:
 
     except httpx.RequestError as e:
         st.error(f"❌ RAG request failed: {e}")
-        return get_fallback_analysis(prompt)
+        return {"diagnosis_summary": "", "exercise_recommendation": []}
     except Exception as e:
         st.error(f"❌ RAG unexpected error: {e}")
-        return get_fallback_analysis(prompt)
+        return {"diagnosis_summary": "", "exercise_recommendation": []}
 
 def get_fallback_analysis(prompt: str) -> dict:
     """Fallback analysis when RAG fails."""
@@ -174,6 +175,10 @@ def main():
         st.header("Settings")
         model_choice = st.selectbox("Pose model", ["MediaPipe", "MoveNet", "OpenPose"])
         thr = st.slider("Confidence threshold", 0.1, 1.0, 0.5, 0.05)
+        st.divider()
+        st.subheader("Threshold Filters")
+        sex = st.selectbox("Sex", ["M", "F"], index=0)
+        age = st.number_input("Age", min_value=10, max_value=100, value=30, step=1)
 
     MODEL_PATH = "models/graph_opt.pb"
     if model_choice == "MoveNet":
@@ -208,6 +213,8 @@ def main():
         )
         if rvid: st.video(rvid)
         pose_frames = met.get("pose_frames", []) if isinstance(met, dict) else []
+        fps = met.get("fps") if isinstance(met, dict) else None
+        rep_events = met.get("rep_events") if isinstance(met, dict) else None
         reps = met.get("squat_reps", 0) if isinstance(met, dict) else 0
         st.info(f"Repetisi squat terdeteksi: {reps}")
         if reps < 5:
@@ -224,36 +231,10 @@ def main():
         def show_metrics_flags(label, pose_frames):
             if not pose_frames:
                 return
-            metrics, flags = analyze_squat_from_sequence(pose_frames, score_thr=thr)
-            st.markdown(f"**{label} Metrics**")
-            if label == "Front":
-                st.json({
-                    "thorax_side_bend_max_deg": metrics.thorax_side_bend_max_deg,
-                    "pelvis_drop_deg_at_depth": metrics.pelvis_drop_deg_at_depth,
-                    "foot_ER_deg_L_at_depth": metrics.foot_ER_deg_L_at_depth,
-                    "foot_ER_deg_R_at_depth": metrics.foot_ER_deg_R_at_depth,
-                    "knee_valgus_deg_L_at_depth": metrics.knee_valgus_deg_L_at_depth,
-                    "knee_valgus_deg_R_at_depth": metrics.knee_valgus_deg_R_at_depth,
-                    "com_shift_ratio_right": metrics.com_shift_ratio_right
-                })
-            elif label == "Side":
-                st.json({
-                    "trunk_lean_max_deg": metrics.trunk_lean_max_deg,
-                    "knee_flex_max_deg_L": metrics.knee_flex_max_deg_L,
-                    "knee_flex_max_deg_R": metrics.knee_flex_max_deg_R,
-                    "hip_flex_max_deg_L": metrics.hip_flex_max_deg_L,
-                    "hip_flex_max_deg_R": metrics.hip_flex_max_deg_R,
-                    "ankle_dorsi_deg_L_at_depth": metrics.ankle_dorsi_deg_L_at_depth,
-                    "ankle_dorsi_deg_R_at_depth": metrics.ankle_dorsi_deg_R_at_depth,
-                    "squat_depth_thigh_deg": metrics.squat_depth_thigh_deg
-                })
-            elif label == "Back":
-                st.json({
-                    "thorax_side_bend_max_deg": metrics.thorax_side_bend_max_deg,
-                    "pelvis_drop_deg_at_depth": metrics.pelvis_drop_deg_at_depth,
-                    "knee_valgus_deg_L_at_depth": metrics.knee_valgus_deg_L_at_depth,
-                    "knee_valgus_deg_R_at_depth": metrics.knee_valgus_deg_R_at_depth
-                })
+            metrics, flags = analyze_squat_from_sequence(pose_frames, score_thr=thr, rep_events=rep_events, fps=fps)
+            st.markdown(f"**{label} Metrics (Filtered by CSV)**")
+            filtered = filter_and_score_metrics(metrics.__dict__, sex=sex, age=int(age))
+            st.json(filtered)
             st.markdown(f"**{label} Flags**")
             if label == "Front":
                 st.json({

@@ -28,8 +28,34 @@ class SquatMetrics:
 	foot_ER_deg_R_at_depth: float
 	knee_valgus_deg_L_at_depth: float
 	knee_valgus_deg_R_at_depth: float
+	knee_valgus_deg_worst_at_depth: float
 	squat_depth_thigh_deg: float
 	com_shift_ratio_right: float  # perkiraan proporsi bobot ke kanan (0..1)
+	# Tambahan metrik agar selaras dengan template Excel
+	trunk_minus_tibia_deg_at_depth: float
+	tibia_forward_deg_L_at_depth: float
+	tibia_forward_deg_R_at_depth: float
+	knee_tracking_dev_deg_L_at_depth: float
+	knee_tracking_dev_deg_R_at_depth: float
+	knee_tracking_dev_worst_deg_at_depth: float
+	pelvic_lateral_shift_percent_at_depth: float
+	butt_wink_deg: float
+	heel_lift_percent_L_at_depth: float
+	heel_lift_percent_R_at_depth: float
+	heel_lift_percent_worst_at_depth: float
+	foot_pronation_proxy_deg_L_at_depth: float
+	foot_pronation_proxy_deg_R_at_depth: float
+	lr_tibia_symmetry_deg_at_depth: float
+	lr_knee_tracking_symmetry_deg_at_depth: float
+	stance_width_ratio_of_pelvis_at_depth: float
+	stance_width_deviation_percent_at_depth: float
+	# Toe-out deviation dari rentang target
+	foot_ER_dev_deg_L_at_depth: float
+	foot_ER_dev_deg_R_at_depth: float
+	# Tempo/Rep timing
+	rep_duration_mean_sec: float
+	rep_duration_cov_percent: float
+	tempo_control_deviation_sec: float
 
 @dataclass
 class SquatFlags:
@@ -127,7 +153,9 @@ def _median_depth_frame(frames: List[Dict[str, Any]]) -> int:
 	return int(np.argmin(ys)) if ys else 0
 
 def analyze_squat_from_sequence(frames: List[Dict[str, Tuple[float,float,float,float]]],
-								score_thr: float = 0.5) -> Tuple[SquatMetrics, Any]:
+								score_thr: float = 0.5,
+								rep_events: Any = None,
+								fps: float = None) -> Tuple[SquatMetrics, Any]:
 	"""
 	frames: list of dict {name: (x,y,z,score)} untuk setiap frame video.
 	score_thr: abaikan landmark dengan confidence < thr.
@@ -155,6 +183,7 @@ def analyze_squat_from_sequence(frames: List[Dict[str, Tuple[float,float,float,f
 
 	knee_flex_L, knee_flex_R = [], []
 	hip_flex_L, hip_flex_R = [], []
+	knee_flex_mean_list = []
 
 	for lm in clean_frames:
 		LSHO, RSHO = G(lm,"LSHO"), G(lm,"RSHO")
@@ -196,10 +225,16 @@ def analyze_squat_from_sequence(frames: List[Dict[str, Tuple[float,float,float,f
 		hR = _flexion_angle_deg(RSHO, RHIP, RKNE)
 		knee_flex_L.append(kL); knee_flex_R.append(kR)
 		hip_flex_L.append(hL); hip_flex_R.append(hR)
+		# Simpan rata-rata fleksi lutut per frame (untuk estimasi frame top/netral)
+		knee_flex_mean_list.append(np.nanmean([kL, kR]))
 
 	# Ambil nilai puncak
 	trunk_lean_max = float(np.nanmax(trunk_lean_list) if trunk_lean_list else np.nan)
 	thorax_side_bend_max = float(np.nanmax(np.abs(thorax_side_bend_list)) if thorax_side_bend_list else np.nan)
+
+	# Tentukan frame top/netral (fleksi lutut paling kecil)
+	t_idx = int(np.nanargmin(knee_flex_mean_list)) if knee_flex_mean_list else 0
+	f_top = clean_frames[t_idx] if clean_frames else {}
 
 	# Di frame terdalam, hitung metrik sisi
 	LSHO, RSHO = G(f_depth,"LSHO"), G(f_depth,"RSHO")
@@ -208,15 +243,64 @@ def analyze_squat_from_sequence(frames: List[Dict[str, Tuple[float,float,float,f
 	LANK, RANK = G(f_depth,"LANK"), G(f_depth,"RANK")
 	LTOE, RTOE = G(f_depth,"LTOE"), G(f_depth,"RTOE")
 
+	# Titik pada frame top
+	LSHO_T, RSHO_T = G(f_top,"LSHO"), G(f_top,"RSHO")
+	LHIP_T, RHIP_T = G(f_top,"LHIP"), G(f_top,"RHIP")
+	LKNE_T, RKNE_T = G(f_top,"LKNE"), G(f_top,"RKNE")
+	LANK_T, RANK_T = G(f_top,"LANK"), G(f_top,"RANK")
+	LTOE_T, RTOE_T = G(f_top,"LTOE"), G(f_top,"RTOE")
+
 	# Pelvic drop (kemiringan pelvis L-R)
 	pelvis_tilt_signed = _signed_lateral_tilt_deg(LHIP, RHIP)  # (+)=right lower
 	# Depth: paha vs horizontal (semakin kecil semakin mendekati sejajar lantai)
 	thigh_deg = min(_thigh_angle_from_horizontal_deg(LHIP, LKNE),
 						_thigh_angle_from_horizontal_deg(RHIP, RKNE))
 
+	# Tibia forward vs vertical pada depth
+	tibia_forward_L = _line_angle_deg(LANK, LKNE, ref="vertical") if ("LANK" in f_depth and "LKNE" in f_depth) else np.nan
+	tibia_forward_R = _line_angle_deg(RANK, RKNE, ref="vertical") if ("RANK" in f_depth and "RKNE" in f_depth) else np.nan
+
+	# Trunk vs vertical pada depth
+	SHO_mid = ((LSHO[0]+RSHO[0])/2, (LSHO[1]+RSHO[1])/2, 0, 1)
+	HIP_mid = ((LHIP[0]+RHIP[0])/2, (LHIP[1]+RHIP[1])/2, 0, 1)
+	trunk_vs_vertical_depth = _line_angle_deg(SHO_mid, HIP_mid, ref="vertical")
+	mean_tibia_forward = np.nanmean([tibia_forward_L, tibia_forward_R])
+	trunk_minus_tibia = float(trunk_vs_vertical_depth - mean_tibia_forward) if not np.isnan(mean_tibia_forward) else np.nan
+
 	# Foot external rotation (ER)
 	foot_ER_L = _foot_progression_angle_deg(LANK, LTOE)
 	foot_ER_R = _foot_progression_angle_deg(RANK, RTOE)
+	# Deviasi dari band target toe-out, misal 5°–15°
+	TOE_OUT_LOW = 5.0
+	TOE_OUT_HIGH = 15.0
+	def _toe_out_dev(val):
+		if np.isnan(val):
+			return float("nan")
+		if val < TOE_OUT_LOW:
+			return float(TOE_OUT_LOW - val)
+		if val > TOE_OUT_HIGH:
+			return float(val - TOE_OUT_HIGH)
+		return 0.0
+	foot_ER_dev_L = _toe_out_dev(foot_ER_L)
+	foot_ER_dev_R = _toe_out_dev(foot_ER_R)
+
+	# Knee tracking deviation vs 2nd toe (HIP→KNEE vs ANKLE→TOE)
+	def _angle_between_vectors_deg(u, v):
+		un = u / (np.linalg.norm(u) + 1e-9)
+		vn = v / (np.linalg.norm(v) + 1e-9)
+		cosang = float(np.clip(np.dot(un, vn), -1.0, 1.0))
+		return float(np.degrees(np.arccos(cosang)))
+	kt_L = np.nan
+	kt_R = np.nan
+	if all(k in f_depth for k in ["LHIP","LKNE","LANK","LTOE"]):
+		vec_hk_L = np.array(f_depth["LKNE"][:2]) - np.array(f_depth["LHIP"][:2])
+		vec_ft_L = np.array(f_depth["LTOE"][:2]) - np.array(f_depth["LANK"][:2])
+		kt_L = _angle_between_vectors_deg(vec_hk_L, vec_ft_L)
+	if all(k in f_depth for k in ["RHIP","RKNE","RANK","RTOE"]):
+		vec_hk_R = np.array(f_depth["RKNE"][:2]) - np.array(f_depth["RHIP"][:2])
+		vec_ft_R = np.array(f_depth["RTOE"][:2]) - np.array(f_depth["RANK"][:2])
+		kt_R = _angle_between_vectors_deg(vec_hk_R, vec_ft_R)
+	kt_worst = float(np.nanmax([kt_L, kt_R])) if not (np.isnan(kt_L) and np.isnan(kt_R)) else np.nan
 
 	# Dorsifleksi pergelangan kaki
 	dorsi_L = _shank_foot_dorsiflex_deg(LKNE, LANK, LTOE)
@@ -225,6 +309,7 @@ def analyze_squat_from_sequence(frames: List[Dict[str, Tuple[float,float,float,f
 	# Valgus (frontal misalignment)
 	valg_L = _valgus_angle_deg(LHIP, LKNE, LANK)
 	valg_R = _valgus_angle_deg(RHIP, RKNE, RANK)
+	valg_worst = float(np.nanmax([valg_L, valg_R])) if not (np.isnan(valg_L) and np.isnan(valg_R)) else np.nan
 
 	# Max flexion akumulatif dari deret
 	knee_flex_max_L = float(np.nanmax(knee_flex_L) if knee_flex_L else np.nan)
@@ -244,6 +329,81 @@ def analyze_squat_from_sequence(frames: List[Dict[str, Tuple[float,float,float,f
 	# Bobot ke kanan
 	com_right = float(np.nanmedian(weight_shift_list) if weight_shift_list else 0.5)
 
+	# Pelvic lateral shift (% pelvis width) pada depth
+	if all(k in f_depth for k in ["LHIP","RHIP"]):
+		pelvis_mid_x = (LHIP[0] + RHIP[0]) / 2.0
+		pelvis_width = max(1e-6, abs(RHIP[0] - LHIP[0]))
+		com_x_depth = _projected_com_x(f_depth)
+		pelvic_shift_pct = float(((com_x_depth - pelvis_mid_x) / pelvis_width) * 100.0)
+	else:
+		pelvic_shift_pct = float("nan")
+
+	# Heel lift percent pada depth (tinggi tumit relatif panjang kaki)
+	try:
+		floor_y_L = np.nanmax([lm["LANK"][1] for lm in clean_frames if "LANK" in lm])
+		floor_y_R = np.nanmax([lm["RANK"][1] for lm in clean_frames if "RANK" in lm])
+	except Exception:
+		floor_y_L, floor_y_R = np.nan, np.nan
+
+	def _heel_lift_pct(ank, toe, floor_y):
+		if ank is None or toe is None or np.isnan(floor_y):
+			return float("nan")
+		foot_len = float(np.linalg.norm(np.array(ank[:2]) - np.array(toe[:2])))
+		if foot_len < 1e-6:
+			return float("nan")
+		height = max(0.0, float(floor_y - ank[1]))
+		return float((height / foot_len) * 100.0)
+
+	heel_L_pct = _heel_lift_pct(f_depth.get("LANK"), f_depth.get("LTOE"), floor_y_L)
+	heel_R_pct = _heel_lift_pct(f_depth.get("RANK"), f_depth.get("RTOE"), floor_y_R)
+	heel_worst_pct = float(np.nanmax([heel_L_pct, heel_R_pct])) if not (np.isnan(heel_L_pct) and np.isnan(heel_R_pct)) else np.nan
+
+	# Pronation proxy (placeholder 2D)
+	pron_L = float("nan")
+	pron_R = float("nan")
+
+	# Simetri L/R pada depth
+	lr_tibia_sym_deg = float(abs(tibia_forward_L - tibia_forward_R)) if not (np.isnan(tibia_forward_L) or np.isnan(tibia_forward_R)) else np.nan
+	lr_knee_track_sym_deg = float(abs(kt_L - kt_R)) if not (np.isnan(kt_L) or np.isnan(kt_R)) else np.nan
+
+	# Stance width ratio vs pelvis pada depth, dan deviasi dari band target
+	STANCE_TARGET_LOW = 0.9
+	STANCE_TARGET_HIGH = 1.1
+	if all(k in f_depth for k in ["LANK","RANK","LHIP","RHIP"]):
+		ankle_width = float(abs(RANK[0] - LANK[0]))
+		pelvis_width_sw = float(max(1e-6, abs(RHIP[0] - LHIP[0])))
+		ratio_stance = float(ankle_width / pelvis_width_sw)
+		if ratio_stance < STANCE_TARGET_LOW:
+			stance_dev_pct = float((STANCE_TARGET_LOW - ratio_stance) / STANCE_TARGET_LOW * 100.0)
+		elif ratio_stance > STANCE_TARGET_HIGH:
+			stance_dev_pct = float((ratio_stance - STANCE_TARGET_HIGH) / STANCE_TARGET_HIGH * 100.0)
+		else:
+			stance_dev_pct = 0.0
+	else:
+		ratio_stance = float("nan")
+		stance_dev_pct = float("nan")
+
+	# Butt wink (proxy): perubahan tilt pelvis top→depth
+	pelvis_tilt_top = _signed_lateral_tilt_deg(LHIP_T, RHIP_T) if ("LHIP" in f_top and "RHIP" in f_top) else np.nan
+	butt_wink = float(abs(pelvis_tilt_signed - pelvis_tilt_top)) if not (np.isnan(pelvis_tilt_signed) or np.isnan(pelvis_tilt_top)) else np.nan
+
+	# Tempo dari rep_events bila tersedia
+	rep_duration_mean_sec = np.nan
+	tempo_control_dev_sec = np.nan
+	rep_cov_percent = np.nan
+	try:
+		if isinstance(rep_events, list) and len(rep_events) >= 2:
+			durations = [e.get("rep_time_top_to_top_sec") for e in rep_events if e.get("rep_time_top_to_top_sec") is not None]
+			if len(durations) < 2:
+				top_times = [e.get("top_time_sec") for e in rep_events if e.get("top_time_sec") is not None]
+				durations = [float(top_times[i] - top_times[i-1]) for i in range(1, len(top_times))] if len(top_times) >= 2 else []
+			if durations:
+				rep_duration_mean_sec = float(np.mean(durations))
+				tempo_control_dev_sec = float(np.std(durations, ddof=1)) if len(durations) >= 2 else 0.0
+				rep_cov_percent = float((tempo_control_dev_sec / rep_duration_mean_sec) * 100.0) if rep_duration_mean_sec > 1e-6 else np.nan
+	except Exception:
+		pass
+
 	metrics = SquatMetrics(
 		trunk_lean_max_deg=trunk_lean_max,
 		thorax_side_bend_max_deg=thorax_side_bend_max,
@@ -258,8 +418,31 @@ def analyze_squat_from_sequence(frames: List[Dict[str, Tuple[float,float,float,f
 		foot_ER_deg_R_at_depth=foot_ER_R,
 		knee_valgus_deg_L_at_depth=valg_L,
 		knee_valgus_deg_R_at_depth=valg_R,
+		knee_valgus_deg_worst_at_depth=valg_worst,
 		squat_depth_thigh_deg=thigh_deg,
-		com_shift_ratio_right=com_right
+		com_shift_ratio_right=com_right,
+		trunk_minus_tibia_deg_at_depth=trunk_minus_tibia,
+		tibia_forward_deg_L_at_depth=tibia_forward_L,
+		tibia_forward_deg_R_at_depth=tibia_forward_R,
+		knee_tracking_dev_deg_L_at_depth=kt_L,
+		knee_tracking_dev_deg_R_at_depth=kt_R,
+		knee_tracking_dev_worst_deg_at_depth=kt_worst,
+		pelvic_lateral_shift_percent_at_depth=pelvic_shift_pct,
+		butt_wink_deg=butt_wink,
+		heel_lift_percent_L_at_depth=heel_L_pct,
+		heel_lift_percent_R_at_depth=heel_R_pct,
+		heel_lift_percent_worst_at_depth=heel_worst_pct,
+		foot_pronation_proxy_deg_L_at_depth=pron_L,
+		foot_pronation_proxy_deg_R_at_depth=pron_R,
+		lr_tibia_symmetry_deg_at_depth=lr_tibia_sym_deg,
+		lr_knee_tracking_symmetry_deg_at_depth=lr_knee_track_sym_deg,
+		stance_width_ratio_of_pelvis_at_depth=ratio_stance,
+		stance_width_deviation_percent_at_depth=stance_dev_pct,
+		foot_ER_dev_deg_L_at_depth=foot_ER_dev_L,
+		foot_ER_dev_deg_R_at_depth=foot_ER_dev_R,
+		rep_duration_mean_sec=rep_duration_mean_sec,
+		rep_duration_cov_percent=rep_cov_percent,
+		tempo_control_deviation_sec=tempo_control_dev_sec
 	)
 
 	# ---- RULES (ambang sederhana; silakan sesuaikan dengan dataset Anda) ----

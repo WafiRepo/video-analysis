@@ -124,6 +124,7 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
     
     # Try to obtain total frame count for progress estimation
     total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    fps_cap = cap.get(cv2.CAP_PROP_FPS) if cap.get(cv2.CAP_PROP_FPS) and cap.get(cv2.CAP_PROP_FPS) > 0 else None
     progress_bar = (st.progress(0) if (ui_mode and total_frames > 0) else None)
     frame_count = 0
 
@@ -145,6 +146,10 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
     phase = "up"  # up -> turun; down -> naik
     knee_angle_ema = None
     alpha_ema = 0.2
+    # Event repetisi untuk tempo (top/bottom timestamps)
+    rep_events = []
+    last_top_time = None
+    pending_bottom_time = None
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -202,10 +207,22 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
                 knee_angle_ema = alpha_ema * knee_angle + (1 - alpha_ema) * knee_angle_ema
             # Hysteresis thresholds (atur sesuai data): bottom < 100°, top > 160°
             if phase == "up" and knee_angle_ema < 100.0:
-                phase = "down"  # mencapai bawah
+                # Transisi menuju bottom
+                phase = "down"
+                pending_bottom_time = time.time() - start_time
             elif phase == "down" and knee_angle_ema > 160.0:
+                # Mencapai top; rep selesai
                 rep_count += 1
                 phase = "up"
+                current_top_time = time.time() - start_time
+                event = {
+                    "bottom_time_sec": pending_bottom_time,
+                    "top_time_sec": current_top_time
+                }
+                if last_top_time is not None:
+                    event["rep_time_top_to_top_sec"] = current_top_time - last_top_time
+                rep_events.append(event)
+                last_top_time = current_top_time
 
         # If skeleton extraction is enabled, process the skeleton image
         if extract_skeleton:
@@ -243,6 +260,12 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
     
     cap.release()
     elapsed_time = time.time() - start_time
+    # Tentukan FPS final
+    final_fps = None
+    if fps_cap and fps_cap > 0:
+        final_fps = float(fps_cap)
+    elif elapsed_time > 0 and frame_count > 0:
+        final_fps = float(frame_count / elapsed_time)
     if ui_mode:
         st.success(f"Video processing complete. Processed {frame_count} frames in {elapsed_time:.2f} seconds.")
     
@@ -345,6 +368,8 @@ def run_video_estimation(analyzer, video_file, threshold, record_video=False, ex
     # Sisipkan hasil tambahan
     metrics_final["pose_frames"] = pose_frames
     metrics_final["squat_reps"] = rep_count
+    metrics_final["fps"] = final_fps
+    metrics_final["rep_events"] = rep_events
     if ui_mode and no_pose_detected:
         logging.warning("Tidak ada pose yang terdeteksi pada seluruh video.")
         st.warning("Tidak ada pose yang terdeteksi pada video. Pastikan video cukup terang dan tubuh terlihat jelas.")
